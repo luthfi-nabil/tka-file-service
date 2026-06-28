@@ -14,6 +14,24 @@ import (
 	"tka-learning-portal/file-service/repository"
 )
 
+// allowedMIMETypes is the set of MIME types the file service will accept.
+var allowedMIMETypes = map[string]bool{
+	"application/pdf": true,
+	// images
+	"image/jpeg": true,
+	"image/png":  true,
+	"image/gif":  true,
+	"image/webp": true,
+	// office documents
+	"application/msword": true,
+	"application/vnd.openxmlformats-officedocument.wordprocessingml.document": true,
+	"application/vnd.ms-excel": true,
+	"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": true,
+	// video
+	"video/mp4":  true,
+	"video/webm": true,
+}
+
 type FileHandler struct {
 	fileRepo      *repository.FileRepository
 	uploadDir     string
@@ -35,11 +53,18 @@ func NewFileHandler(fileRepo *repository.FileRepository, uploadDir string, maxFi
 // Request: multipart/form-data
 //   - file: the file to upload (required)
 //
+// Allowed MIME types:
+//   - application/pdf
+//   - image/jpeg, image/png, image/gif, image/webp
+//   - application/msword, application/vnd.openxmlformats-officedocument.wordprocessingml.document
+//   - application/vnd.ms-excel, application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+//   - video/mp4, video/webm
+//
 // Response 201:
 //
 //	{ "file_id": "550e8400-e29b-41d4-a716-446655440000" }
 //
-// Response 400: missing file or file too large
+// Response 400: missing file, file too large, or unsupported file type
 // Response 401: unauthorized
 // Response 500: storage error
 func (h *FileHandler) Upload(c *gin.Context) {
@@ -73,6 +98,14 @@ func (h *FileHandler) Upload(c *gin.Context) {
 	mimeType := header.Header.Get("Content-Type")
 	if mimeType == "" {
 		mimeType = http.DetectContentType(data)
+	}
+	// Strip any parameters (e.g. "application/pdf; charset=utf-8" → "application/pdf")
+	mimeType = strings.SplitN(mimeType, ";", 2)[0]
+	mimeType = strings.TrimSpace(mimeType)
+
+	if !allowedMIMETypes[mimeType] {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("unsupported file type: %s", mimeType)})
+		return
 	}
 
 	ext := filepath.Ext(header.Filename)

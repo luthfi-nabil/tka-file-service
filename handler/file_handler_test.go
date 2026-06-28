@@ -6,6 +6,7 @@ import (
 	"crypto/rsa"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -274,10 +275,11 @@ func TestFileCRUD_Full(t *testing.T) {
 	eng := buildEngine(db, dir)
 	tok := makeAdminToken(t)
 
-	fileContent := []byte("hello from TKA file service test")
+	// Use a minimal valid JPEG (FF D8 FF E0 header) so MIME validation passes.
+	fileContent := []byte{0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10}
 
 	// ── Upload ──
-	req := buildUploadRequest(t, "test-upload.txt", fileContent)
+	req := buildUploadRequestWithContentType(t, "test-upload.jpg", "image/jpeg", fileContent)
 	req.Header.Set("Authorization", "Bearer "+tok)
 
 	w := httptest.NewRecorder()
@@ -308,7 +310,7 @@ func TestFileCRUD_Full(t *testing.T) {
 	if meta["file_id"] != fileID {
 		t.Errorf("get meta: file_id mismatch, got %v", meta["file_id"])
 	}
-	if meta["original_name"] != "test-upload.txt" {
+	if meta["original_name"] != "test-upload.jpg" {
 		t.Errorf("get meta: original_name mismatch, got %v", meta["original_name"])
 	}
 
@@ -348,5 +350,87 @@ func TestFileCRUD_Full(t *testing.T) {
 	// Cleanup temp dir
 	for _, f := range storedFiles {
 		os.Remove(f)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// MIME type validation
+// ---------------------------------------------------------------------------
+
+// pdfMagicBytes is the PDF file signature (%PDF-).
+var pdfMagicBytes = []byte{0x25, 0x50, 0x44, 0x46, 0x2D, 0x31, 0x2E, 0x34}
+
+func buildUploadRequestWithContentType(t *testing.T, filename, contentType string, content []byte) *http.Request {
+	t.Helper()
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+
+	h := make(map[string][]string)
+	h["Content-Disposition"] = []string{fmt.Sprintf(`form-data; name="file"; filename="%s"`, filename)}
+	h["Content-Type"] = []string{contentType}
+
+	fw, err := mw.CreatePart(h)
+	if err != nil {
+		t.Fatalf("create form part: %v", err)
+	}
+	fw.Write(content)
+	mw.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/files/upload", &buf)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	return req
+}
+
+func TestUpload_PDFAccepted(t *testing.T) {
+	cfg := realConfig()
+	db := connectDB(t, cfg)
+	defer db.Close()
+
+	dir := t.TempDir()
+	eng := buildEngine(db, dir)
+	tok := makeAdminToken(t)
+
+	req := buildUploadRequestWithContentType(t, "document.pdf", "application/pdf", pdfMagicBytes)
+	req.Header.Set("Authorization", "Bearer "+tok)
+
+	w := httptest.NewRecorder()
+	eng.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("pdf upload: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]string
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	fileID := resp["file_id"]
+	if fileID == "" {
+		t.Fatal("pdf upload: expected file_id in response")
+	}
+
+	// Cleanup
+	db.Exec(`UPDATE uploaded_files SET soft_delete = 1 WHERE file_id = $1::uuid`, fileID)
+	storedFiles, _ := filepath.Glob(filepath.Join(dir, fileID+"*"))
+	for _, f := range storedFiles {
+		os.Remove(f)
+	}
+}
+
+func TestUpload_UnsupportedTypeRejected(t *testing.T) {
+	cfg := realConfig()
+	db := connectDB(t, cfg)
+	defer db.Close()
+
+	dir := t.TempDir()
+	eng := buildEngine(db, dir)
+	tok := makeAdminToken(t)
+
+	req := buildUploadRequestWithContentType(t, "script.exe", "application/octet-stream", []byte{0x4D, 0x5A})
+	req.Header.Set("Authorization", "Bearer "+tok)
+
+	w := httptest.NewRecorder()
+	eng.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("unsupported type: expected 400, got %d: %s", w.Code, w.Body.String())
 	}
 }

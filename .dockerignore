@@ -1,0 +1,6 @@
+*_test.go
+Unit tests/
+uploads/
+.env*
+.git
+*.md
